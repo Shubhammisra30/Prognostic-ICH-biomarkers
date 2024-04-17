@@ -1,0 +1,22 @@
+#Codes for Missing value imputation analysis using R
+
+#Load packages
+library(missForest)
+library(plyr)
+library(tidyverse)
+
+#Missing value Imputation
+data_imp = read.csv("Before_Imputation.csv", 
+                     row.name=1, stringsAsFactors=FALSE)
+summary(data_imp)
+view(data_imp)
+set.seed(200)
+r.imputation= missForest(data_imp, maxiter = 10, ntree = 100, variablewise = FALSE,
+                         decreasing = FALSE, verbose = TRUE,
+                         replace = TRUE,
+                         classwt = NULL, cutoff = NULL, strata = NULL,
+                         sampsize = NULL, nodesize = NULL, maxnodes = NULL,
+                         xtrue = NA, parallelize = c('no'))
+r.imputation$ximp
+r.imputation$OOBerror
+write.csv(r.imputation$ximp, "After_Imputation.csv")
