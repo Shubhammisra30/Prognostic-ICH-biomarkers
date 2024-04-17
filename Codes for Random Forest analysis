@@ -1,0 +1,312 @@
+#Codes for Random Forest-based Machine learning analysis in Python
+
+import torch
+import os
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import torch.utils.data
+import pickle
+import numpy as np
+import pandas as pd
+import missingno as msno
+import matplotlib.pyplot as plt
+import seaborn as sns
+import sklearn
+import plotly
+import seaborn
+import shap
+from tqdm import tqdm
+import optuna
+from sklearn.inspection import permutation_importance
+import optuna
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import roc_auc_score
+from tqdm import tqdm
+from sklearn.model_selection import train_test_split
+from xgboost import cv
+from scipy.stats import rankdata
+
+
+
+## Import dataset
+ICH_data = pd.read_csv("ICH data.csv")
+
+cat_vars = ['Gender','Low Economic Status', 'No Exercise', 'Low Education',
+       'Presently using antihypertensives', 'ACE inhibitor',
+       'Angiotensin Receptor Blocker', 'Beta blocker',
+       'Calcium Channel Blocker', 'Diuretic', 'Hypertension', 'Diabetes',
+       'Dyslipidemia', 'Myocardial Infarction', 'Atrial Fibrillation',
+       'Angina Pectoris', 'Migraine', 'Current Smoking', 'Mild alcohol',
+       'Moderate alcohol', 'Heavy alcohol', 'Deep ICH',
+       'Lobar ICH', 'Intraventricular extension', 'Any surgical procedure','Obesity']
+
+ICH_categorical = ICH_data.loc[:,cat_vars]
+ICH_pred_vars = ICH_data.drop(['Poor Outcome_90 day', 'Mortality_90 day','Poor Outcome_180 day', 'Mortality_180 day'], axis = 1)
+ICH_outcome_vars = ICH_data[['Poor Outcome_90 day', 'Mortality_90 day','Poor Outcome_180 day', 'Mortality_180 day']]
+noncat_vars = ICH_pred_vars.loc[:, ~ICH_pred_vars.columns.isin(cat_vars)].columns
+
+fig, axs = plt.subplots(5, 7, figsize = (20,20))
+
+for i in range(0, len(ICH_pred_vars.loc[:, ~ICH_pred_vars.columns.isin(cat_vars)].columns)):
+    axs[i%5, int(i/5)].hist(ICH_pred_vars.loc[:, ~ICH_pred_vars.columns.isin(cat_vars)].iloc[:,i])
+    axs[i%5, int(i/5)].set(xlabel = ICH_pred_vars.loc[:, ~ICH_pred_vars.columns.isin(cat_vars)].columns[i])
+fig.tight_layout()    
+plt.savefig('original_distribution.png')
+plt.show()
+
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+
+transformer = FunctionTransformer(np.log1p, validate=True)
+
+#variables that look log-like (cell counts have reasonable statistical reason to be log-like )
+log_vars = ["Time taken to reach hospital", "Total Bilirubin", "Creatinine", "ICH volume", "Random Blood Sugar", "Blood Urea"]
+ICH_pred_vars.loc[:,log_vars] = np.log(ICH_pred_vars.loc[:,log_vars])
+
+#Minmax scaling for scores
+ordinal_vars = ["NIH Stroke Scale"]
+scaler = MinMaxScaler()
+scaler.fit(ICH_pred_vars.loc[:,ordinal_vars])
+ICH_pred_vars.loc[:,ordinal_vars] = scaler.transform(ICH_pred_vars.loc[:,ordinal_vars])
+
+#Standardise non-categorical vars
+cols_to_standardize = ICH_pred_vars.loc[:, ~ICH_pred_vars.columns.isin(cat_vars)]
+avgs = cols_to_standardize.mean()
+stdevs = cols_to_standardize.std()
+standardized_vals = (cols_to_standardize - avgs)/stdevs
+
+fig, axs = plt.subplots(6, 6, figsize = (15,15))
+
+for i in range(0, len(standardized_vals.columns)):
+    axs[i%6, int(i/6)].hist(standardized_vals.iloc[:,i])
+    axs[i%6, int(i/6)].set(xlabel = cols_to_standardize.columns[i])
+fig.tight_layout()    
+plt.savefig('transformed_distribution.png')
+plt.show()
+
+#combine into one dataframe
+ICH_standardized = ICH_pred_vars.loc[:, ICH_pred_vars.columns.isin(cat_vars)]
+ICH_standardized = pd.concat([ICH_standardized, standardized_vals.loc[:, ~standardized_vals.columns.isin(cat_vars)]], axis = 1)
+
+fig, axs = plt.subplots(8, 8, figsize = (20,20))
+
+for i in range(0, len(ICH_standardized.columns)):
+    axs[i%8, int(i/8)].hist(ICH_standardized.iloc[:,i])
+    axs[i%8, int(i/8)].set(xlabel = ICH_standardized.columns[i])
+fig.tight_layout()       
+plt.savefig('all_transformed_distribution_complete.png')
+plt.show()
+
+####90 days poor outcome
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+from sklearn.metrics import roc_auc_score
+
+
+X_90 = ICH_standardized
+X_180 = ICH_standardized
+
+y_90 = ICH_outcome_vars.iloc[:,0:2]
+y_180 = ICH_outcome_vars.iloc[:,2:4]
+X_90 = X_90.iloc[np.where(pd.notnull(y_90.iloc[:,0]))]
+y_90 = y_90.iloc[np.where(pd.notnull(y_90.iloc[:,0]))]
+
+from tqdm import tqdm
+## SHAP values
+shap_vals_90d_po = []
+abs_shap_vals_90d_po = []
+for i in tqdm(range(100)):
+    X_90_train, X_90_test, y_90_train, y_90_test = train_test_split(X_90, y_90, test_size = 0.3, random_state = np.random.randint(0,300))
+    rf_90_po = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 1000)
+    rf_90_po.fit(X_90_train, y_90_train.iloc[:,0])
+    explainer = shap.TreeExplainer(rf_90_po)
+    shap_values = explainer.shap_values(X_90)[1]
+    mean_shap_vals = np.mean(shap_values, axis = 0)
+    mean_shap_vals_abs = np.abs(mean_shap_vals)
+    shap_vals_90d_po.append(mean_shap_vals)
+    abs_shap_vals_90d_po.append(mean_shap_vals_abs)
+
+abs_shap_vals_to_plot_90d_pooroutcome = np.mean(abs_shap_vals_90d_po, axis = 0)
+sorted_idx = abs_shap_vals_to_plot_90d_pooroutcome.argsort()
+plt.figure(figsize=(50,50), facecolor='white')
+plt.barh(X_90.columns[sorted_idx], abs_shap_vals_to_plot_90d_pooroutcome[sorted_idx])
+plt.yticks(fontsize=60)
+plt.xticks(fontsize=60)
+plt.xlabel("Mean Shapley values for Predicting Poor Outcome at 90 days", fontsize = 70)
+plt.tight_layout(pad = 4)
+plt.savefig("90d_pooroutcome_SHAP.png")
+plt.show()
+
+top10_90d_po = X_90[X_90.columns[sorted_idx][50:60]]
+from sklearn.model_selection import KFold
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import RocCurveDisplay
+kf = KFold(n_splits=5)
+aucs_90d_po_top10 = []
+aucs_90d_po_all = []
+for train, test in kf.split(top10_90d_po):
+    X_train = top10_90d_po.iloc[train]
+    X_test = top10_90d_po.iloc[test]
+    X_train_all = X_90.iloc[train]
+    X_test_all = X_90.iloc[test]
+    y_train = y_90.iloc[train].iloc[:,0]
+    y_test = y_90.iloc[test].iloc[:,0]
+
+    rf_90_po_top10 = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+    rf_90_po_top10.fit(X_train, y_train)
+    rf_90_po_all = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+    rf_90_po_all.fit(X_train_all, y_train)
+    y_preds_top10 = rf_90_po_top10.predict_proba(X_test)
+    y_preds_all = rf_90_po_all.predict_proba(X_test_all)
+    
+    aucs_90d_po_top10.append(roc_auc_score(y_test, y_preds_top10[:,1]))
+    aucs_90d_po_all.append(roc_auc_score(y_test, y_preds_all[:,1]))
+
+
+print(aucs_90d_po_top10)
+print(aucs_90d_po_all)
+    
+#Perform cross-validation
+top10_90d_po = X_90[X_90.columns[sorted_idx][50:60]]
+
+#all variables
+from sklearn import model_selection
+rf_90_po_all = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+auc_90_po_all = model_selection.cross_val_score(rf_90_po_all, X_90, y_90.iloc[:,0], scoring = "roc_auc", cv = 5)
+prec_90_po_all = model_selection.cross_val_score(rf_90_po_all, X_90, y_90.iloc[:,0], scoring = "precision", cv = 5)
+rec_90_po_all = model_selection.cross_val_score(rf_90_po_all, X_90, y_90.iloc[:,0], scoring = "recall", cv = 5)
+acc_90_po_all = model_selection.cross_val_score(rf_90_po_all, X_90, y_90.iloc[:,0], scoring = "accuracy", cv = 5)
+
+#top 10 variables
+from sklearn import model_selection
+rf_90_po_top10 = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+auc_90_po_top10 = model_selection.cross_val_score(rf_90_po_top10, top10_90d_po, y_90.iloc[:,0], scoring = "roc_auc", cv = 5)
+prec_90_po_top10 = model_selection.cross_val_score(rf_90_po_top10, X_90, y_90.iloc[:,0], scoring = "precision", cv = 5)
+rec_90_po_top10 = model_selection.cross_val_score(rf_90_po_top10, X_90, y_90.iloc[:,0], scoring = "recall", cv = 5)
+acc_90_po_top10 = model_selection.cross_val_score(rf_90_po_top10, X_90, y_90.iloc[:,0], scoring = "accuracy", cv = 5)
+
+cv_90_po = {"auc" : auc_90_po_all, "precision": prec_90_po_all, "recall": rec_90_po_all, "accuracy": acc_90_po_all}
+cv_90_po_df = pd.DataFrame(cv_90_po)
+cv_90_po_df.to_csv("ICH/cv_90_po.csv")
+
+cv_90_po_top10 = {"auc" : auc_90_po_top10, "precision": prec_90_po_top10, "recall": rec_90_po_top10, "accuracy": acc_90_po_top10}
+cv_90_po_top10_df = pd.DataFrame(cv_90_po_top10)
+cv_90_po_top10_df.to_csv("ICH/cv_90_po_top10.csv")
+
+
+#####180 days poor outcome
+X_180 = X_180.iloc[np.where(pd.notnull(y_180.iloc[:,0]))]
+y_180 = y_180.iloc[np.where(pd.notnull(y_180.iloc[:,0]))]
+
+from tqdm import tqdm
+## SHAP values
+shap_vals_180d_po = []
+abs_shap_vals_180d_po = []
+for i in tqdm(range(100)):
+    X_180_train, X_180_test, y_180_train, y_180_test = train_test_split(X_180, y_180, test_size = 0.3, random_state = np.random.randint(0,300))
+    rf_180_po = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 1000)
+    rf_180_po.fit(X_180_train, y_180_train.iloc[:,0])
+    explainer = shap.TreeExplainer(rf_180_po)
+    shap_values = explainer.shap_values(X_180)[1]
+    mean_shap_vals = np.mean(shap_values, axis = 0)
+    mean_shap_vals_abs = np.abs(mean_shap_vals)
+    shap_vals_180d_po.append(mean_shap_vals)
+    abs_shap_vals_180d_po.append(mean_shap_vals_abs)
+
+abs_shap_vals_to_plot_180d_pooroutcome = np.mean(abs_shap_vals_180d_po, axis = 0)
+sorted_idx = abs_shap_vals_to_plot_180d_pooroutcome.argsort()
+plt.figure(figsize=(50,50), facecolor = "white")
+plt.barh(X_180.columns[sorted_idx], abs_shap_vals_to_plot_180d_pooroutcome[sorted_idx])
+plt.yticks(fontsize=60)
+plt.xticks(fontsize=60)
+plt.xlabel("Mean Shapley Values for Predicting Poor Outcome at 180 days", fontsize = 70)
+plt.tight_layout(pad = 4)
+plt.savefig("180d_pooroutcome_SHAP.png")
+plt.show()
+
+#all variables
+from sklearn import model_selection
+rf_180_po_all = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+auc_180_po_all = model_selection.cross_val_score(rf_180_po_all, X_180, y_180.iloc[:,0], scoring = "roc_auc", cv = 5)
+prec_180_po_all = model_selection.cross_val_score(rf_180_po_all, X_180, y_180.iloc[:,0], scoring = "precision", cv = 5)
+rec_180_po_all = model_selection.cross_val_score(rf_180_po_all, X_180, y_180.iloc[:,0], scoring = "recall", cv = 5)
+acc_180_po_all = model_selection.cross_val_score(rf_180_po_all, X_180, y_180.iloc[:,0], scoring = "accuracy", cv = 5)
+
+#top 10 variables
+from sklearn import model_selection
+rf_180_po_top10 = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 3000)
+auc_180_po_top10 = model_selection.cross_val_score(rf_180_po_top10, top10_180d_po, y_180.iloc[:,0], scoring = "roc_auc", cv = 5)
+prec_180_po_top10 = model_selection.cross_val_score(rf_180_po_top10, X_180, y_180.iloc[:,0], scoring = "precision", cv = 5)
+rec_180_po_top10 = model_selection.cross_val_score(rf_180_po_top10, X_180, y_180.iloc[:,0], scoring = "recall", cv = 5)
+acc_180_po_top10 = model_selection.cross_val_score(rf_180_po_top10, X_180, y_180.iloc[:,0], scoring = "accuracy", cv = 5)
+
+
+#######90 days mortality
+from tqdm import tqdm
+## SHAP values
+shap_vals_90d_death = []
+abs_shap_vals_90d_death = []
+for i in tqdm(range(100)):
+    X_90_train, X_90_test, y_90_train, y_90_test = train_test_split(X_90, y_90, test_size = 0.3, random_state = np.random.randint(0,300))
+    rf_90_death = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 1000)
+    rf_90_death.fit(X_90_train, y_90_train.iloc[:,1])
+    explainer = shap.TreeExplainer(rf_90_death)
+    shap_values = explainer.shap_values(X_90)[1]
+    mean_shap_vals = np.mean(shap_values, axis = 0)
+    mean_shap_vals_abs = np.abs(mean_shap_vals)
+    shap_vals_90d_death.append(mean_shap_vals)
+    abs_shap_vals_90d_death.append(mean_shap_vals_abs)
+
+
+rf_90_death = RandomForestClassifier(random_state=0, n_estimators = 1000)
+rf_90_death.fit(X_90_train, y_90_train.iloc[:,1])
+y_90_death_pred = rf_90_death.predict_proba(X_90)
+auc_90_death = roc_auc_score(y_90.iloc[:,1], y_90_death_pred[:,1])
+print(auc_90_death)
+
+abs_shap_vals_to_plot_90d_death = np.mean(abs_shap_vals_90d_death, axis = 0)
+sorted_idx = abs_shap_vals_to_plot_90d_death.argsort()
+plt.figure(figsize=(50,50), facecolor='white')
+plt.barh(X_90.columns[sorted_idx], abs_shap_vals_to_plot_90d_death[sorted_idx])
+plt.yticks(fontsize=60)
+plt.xticks(fontsize=50)
+plt.xlabel("Mean Shapley values for Predicting Death at 90 days", fontsize = 65)
+plt.tight_layout(pad = 4)
+plt.savefig("90d_death_SHAP.png")
+plt.show()
+
+
+#####180 days mortality
+X_180 = ICH_standardized
+y_180 = ICH_outcome_vars.iloc[:,2:4]
+X_180 = X_180.iloc[np.where(pd.notnull(y_180.iloc[:,1]))]
+y_180 = y_180.iloc[np.where(pd.notnull(y_180.iloc[:,1]))]
+
+
+## SHAP values
+shap_vals_180d_death = []
+abs_shap_vals_180d_death = []
+for i in tqdm(range(100)):
+    X_180_train, X_180_test, y_180_train, y_180_test = train_test_split(X_180, y_180, test_size = 0.3, random_state = np.random.randint(0,300))
+    rf_180_death = RandomForestClassifier(random_state= np.random.randint(0,300), n_estimators = 1000)
+    rf_180_death.fit(X_180_train, y_180_train.iloc[:,1])
+    explainer = shap.TreeExplainer(rf_180_death)
+    shap_values = explainer.shap_values(X_180)[1]
+    mean_shap_vals = np.mean(shap_values, axis = 0)
+    mean_shap_vals_abs = np.abs(mean_shap_vals)
+    shap_vals_180d_death.append(mean_shap_vals)
+    abs_shap_vals_180d_death.append(mean_shap_vals_abs)
+
+abs_shap_vals_to_plot_180d_death = np.mean(abs_shap_vals_180d_death, axis = 0)
+sorted_idx = abs_shap_vals_to_plot_180d_death.argsort()
+plt.figure(figsize=(50,50), facecolor='white')
+plt.barh(X_180.columns[sorted_idx], abs_shap_vals_to_plot_180d_death[sorted_idx])
+plt.yticks(fontsize=60)
+plt.xticks(fontsize=60)
+plt.xlabel("Mean Shapley values for Predicting Death at 180 days", fontsize = 70)
+plt.tight_layout(pad = 4)
+plt.savefig("180d_death_SHAP.png")
+plt.show()
